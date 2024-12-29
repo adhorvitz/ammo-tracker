@@ -3,6 +3,9 @@ import sqlite3
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from dateutil import parser  # For flexible date parsing
+import shutil
+import matplotlib.pyplot as plt
+import datetime
 
 
 # ---------------------------------------------------------------------------------
@@ -70,6 +73,29 @@ def extract_data(db_file="ammo.db"):
             "Quantity_Loose", "Quantity_in_Magazine", "Type", "Grain", "Firearm_Type", "Date_Entered"]
     return [dict(zip(keys, row)) for row in rows]
 
+def backup_database():
+    """
+    Backs up the SQLite database to a user-specified location.
+    """
+    backup_path = filedialog.asksaveasfilename(defaultextension=".db", filetypes=[("SQLite Database", "*.db")])
+    if backup_path:
+        try:
+            shutil.copy("ammo.db", backup_path)
+            messagebox.showinfo("Success", "Database backed up successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to back up database: {e}")
+
+def restore_database():
+    """
+    Restores the SQLite database from a user-selected backup.
+    """
+    restore_path = filedialog.askopenfilename(filetypes=[("SQLite Database", "*.db")])
+    if restore_path:
+        try:
+            shutil.copy(restore_path, "ammo.db")
+            messagebox.showinfo("Success", "Database restored successfully!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to restore database: {e}")
 
 # ---------------------------------------------------------------------------------
 # HELPER FUNCTIONS: Validation, Refresh, and Update
@@ -119,10 +145,34 @@ def delete_record(tree):
 
         # Remove the record from the Treeview
         tree.delete(selected_item)
+        refresh_inventory(tree)  # Auto-refreshes the displayed inventory
+        # Log the action
+        log_action("Delete", f"Deleted record with ID {item_id}")
+
 
         messagebox.showinfo("Success", "Record deleted successfully!")
     except Exception as e:
         messagebox.showerror("Error", f"Failed to delete record: {e}")
+
+def show_statistics():
+    """
+    Displays a bar chart summarizing inventory by Ammo Type.
+    """
+    conn = sqlite3.connect("ammo.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT Ammo_Type, SUM(Quantity_Box + Quantity_Loose) AS Total FROM ammo GROUP BY Ammo_Type")
+    data = cursor.fetchall()
+    conn.close()
+
+    # Prepare data for the chart
+    types = [row[0] for row in data]
+    totals = [row[1] for row in data]
+
+    plt.bar(types, totals)
+    plt.xlabel("Ammo Type")
+    plt.ylabel("Total Quantity")
+    plt.title("Inventory by Ammo Type")
+    plt.show()
 
 
 # ---------------------------------------------------------------------------------
@@ -204,6 +254,7 @@ def add_inventory():
             conn.close()
             messagebox.showinfo("Success", "Inventory added successfully!")
             add_window.destroy()
+            log_action("Add", f"Added new inventory: {new_entry}")
         except ValueError as ve:
             messagebox.showerror("Validation Error", f"Invalid input: {ve}")
         except Exception as e:
@@ -233,21 +284,57 @@ def add_inventory():
     firearm_entry = entries["Firearm_Type"]
     date_entry = entries["Date_Entered"]
 
+    refresh_inventory(tree)  # Auto-refreshes the displayed inventory
+
     tk.Button(add_window, text="Save", command=save_inventory).grid(row=len(labels), column=1, pady=10)
 
 
 def search_inventory():
+    """
+    Opens a form for advanced inventory search, including single-term search and multi-criteria search.
+    """
     search_window = tk.Toplevel(window)
-    search_window.title("Search Inventory")
+    search_window.title("Advanced Search")
 
-    tk.Label(search_window, text="Search All Columns:").grid(row=0, column=0, padx=5, pady=5)
-    search_entry = tk.Entry(search_window)
-    search_entry.grid(row=0, column=1, padx=5, pady=5)
+    # Create input fields for multi-criteria search
+    criteria = {}
+    labels = ["Ammo Type", "Brand", "Gauge or Ammo Size", "Date (Start)", "Date (End)"]
+    for i, label in enumerate(labels):
+        tk.Label(search_window, text=f"{label}:").grid(row=i, column=0, padx=5, pady=5)
+        entry = tk.Entry(search_window)
+        entry.grid(row=i, column=1, padx=5, pady=5)
+        criteria[label] = entry
 
-    def perform_advanced_search():
-        search_term = search_entry.get().strip().lower()
-        inventory = extract_data()
-        results = [row for row in inventory if any(search_term in str(value).lower() for value in row.values())]
+    def perform_search():
+        """
+        Searches the database with multiple criteria and displays results.
+        """
+        query = "SELECT * FROM ammo WHERE 1=1"
+        params = []
+
+        # Build query dynamically
+        if criteria["Ammo Type"].get():
+            query += " AND Ammo_Type LIKE ?"
+            params.append(f"%{criteria['Ammo Type'].get()}%")
+        if criteria["Brand"].get():
+            query += " AND Brand LIKE ?"
+            params.append(f"%{criteria['Brand'].get()}%")
+        if criteria["Gauge or Ammo Size"].get():
+            query += " AND Gauge_or_Ammo_Size LIKE ?"
+            params.append(f"%{criteria['Gauge or Ammo Size'].get()}%")
+        if criteria["Date (Start)"].get() and criteria["Date (End)"].get():
+            query += " AND Date_Entered BETWEEN ? AND ?"
+            params.append(criteria["Date (Start)"].get())
+            params.append(criteria["Date (End)"].get())
+
+        # Execute query and fetch results
+        conn = sqlite3.connect("ammo.db")
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        conn.close()
+
+        # Display results
         if not results:
             messagebox.showinfo("No Results", "No items match your search.")
             return
@@ -262,10 +349,12 @@ def search_inventory():
             tree.heading(col, text=col)
             tree.column(col, width=100, anchor="center")
         for row in results:
-            tree.insert("", "end", values=[row[col] for col in columns])
+            tree.insert("", "end", values=row)
         tree.pack(fill="both", expand=True)
 
-    tk.Button(search_window, text="Search", command=perform_advanced_search).grid(row=1, column=1, pady=10)
+    # Add "Search" button
+    tk.Button(search_window, text="Search", command=perform_search).grid(row=len(labels), column=1, pady=10)
+
 
 
 def edit_inventory():
@@ -322,6 +411,8 @@ def edit_record(tree):
         entry.grid(row=i, column=1, padx=5, pady=5)
         entries[label.replace(" ", "_")] = entry
 
+    refresh_inventory(tree)  # Auto-refreshes the displayed inventory
+
     def save_changes():
         """
         Saves changes to the database and refreshes the inventory display.
@@ -348,6 +439,7 @@ def edit_record(tree):
             messagebox.showinfo("Success", "Record updated successfully!")
             refresh_inventory(tree)
             edit_window.destroy()
+            log_action("Edit", f"Edited record ID {item_id}")
         except ValueError as ve:
             messagebox.showerror("Validation Error", f"Error: {ve}")
         except Exception as e:
@@ -355,6 +447,13 @@ def edit_record(tree):
 
     tk.Button(edit_window, text="Save Changes", command=save_changes).grid(row=len(labels), column=1, pady=10)
 
+def log_action(action, details):
+    """
+    Logs actions (add, edit, delete) to a text file.
+    """
+    with open("audit_log.txt", "a") as log_file:
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_file.write(f"{timestamp} | {action} | {details}\n")
 
 # ---------------------------------------------------------------------------------
 # MAIN PROGRAM: Initialize and run GUI.
@@ -367,8 +466,12 @@ window.title("Ammo Tracker")
 tk.Button(window, text="Load Initial CSV", command=load_initial_csv).pack(pady=5)
 tk.Button(window, text="Display Inventory", command=display_inventory).pack(pady=5)
 tk.Button(window, text="Add Inventory", command=add_inventory).pack(pady=5)
-tk.Button(window, text="Search Inventory", command=search_inventory).pack(pady=5)
 tk.Button(window, text="Edit Inventory", command=edit_inventory).pack(pady=5)
+tk.Button(window, text="Backup Database", command=backup_database).pack(pady=5)
+tk.Button(window, text="Restore Database", command=restore_database).pack(pady=5)
+tk.Button(window, text="Show Statistics", command=show_statistics).pack(pady=5)
+tk.Button(window, text="Search Inventory", command=search_inventory).pack(pady=5)
+
 
 # Ensure the database schema is created
 create_database()
